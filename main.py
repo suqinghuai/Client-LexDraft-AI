@@ -109,48 +109,23 @@ def load_prompt(doc_name):
             return f.read().strip()
     return ""
 
-def call_api(config, system_prompt, user_input):
+API_TIMEOUT = 120
+
+
+def _do_api_call(config, messages):
+    """统一 API 调用，供 call_api / call_api_chat 复用。"""
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {config['api_key']}"
     }
-    payload = {
-        "model": config["model"],
-        "temperature": config["temperature"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input}
-        ]
-    }
-    try:
-        resp = requests.post(config["url"], headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-    except requests.exceptions.Timeout:
-        return "错误：请求超时，请检查网络连接或稍后重试。"
-    except requests.exceptions.ConnectionError:
-        return "错误：无法连接到API服务器，请检查网络和API地址。"
-    except KeyError:
-        return f"错误：API返回格式异常。\n{resp.text}"
-    except Exception as e:
-        return f"错误：{str(e)}"
-
-
-def call_api_chat(config, system_prompt, history_messages):
-    """支持多轮对话：history_messages 形如 [{'role':'user','content':'...'}, {'role':'assistant','content':'...'}]。"""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {config['api_key']}"
-    }
-    messages = [{"role": "system", "content": system_prompt}] + history_messages
     payload = {
         "model": config["model"],
         "temperature": config["temperature"],
         "messages": messages
     }
+    resp = None
     try:
-        resp = requests.post(config["url"], headers=headers, json=payload, timeout=120)
+        resp = requests.post(config["url"], headers=headers, json=payload, timeout=API_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"]
@@ -159,9 +134,23 @@ def call_api_chat(config, system_prompt, history_messages):
     except requests.exceptions.ConnectionError:
         return "错误：无法连接到API服务器，请检查网络和API地址。"
     except KeyError:
-        return f"错误：API返回格式异常。\n{resp.text}"
+        resp_text = resp.text if resp is not None else "无响应"
+        return f"错误：API返回格式异常。\n{resp_text}"
     except Exception as e:
         return f"错误：{str(e)}"
+
+
+def call_api(config, system_prompt, user_input):
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_input}
+    ]
+    return _do_api_call(config, messages)
+
+
+def call_api_chat(config, system_prompt, history_messages):
+    messages = [{"role": "system", "content": system_prompt}] + history_messages
+    return _do_api_call(config, messages)
 
 
 # Word 导出不再依赖 xhtml2pdf / reportlab，直接用 python-docx，Word 自带中文字形。
@@ -338,9 +327,21 @@ class LegalDocumentApp:
         self._nav_buttons = []
         self.chat_messages = []          # 多轮对话历史
         self._chat_btn = None            # 智能法律顾问按钮（用于高亮态）
+        self.legal_references_data = None          # 法条与类案数据
+        self._last_refine_content = None           # 最近生成/优化的内容（供法条分析用）
+        self._ref_panel = None                     # 右侧法条面板
+        self._ref_panel_visible = False            # 面板展开状态
+        self._ref_panel_content = None             # 面板内滚动区域Frame
+        self._toggle_ref_btn = None                # 面板切换按钮
 
         self._build_ui()
         self._show_home()
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+    def _on_closing(self):
+        if messagebox.askyesno("确认退出", "确定要退出智能法律文书系统吗？"):
+            self.root.destroy()
 
     def _build_ui(self):
         self.main_frame = tk.Frame(self.root, bg=COLORS["bg_content"])
@@ -700,8 +701,16 @@ class LegalDocumentApp:
                      fg=COLORS["warning_orange"], bg=COLORS["bg_card"],
                      font=(FONT_FAMILY, 9)).pack(side=tk.LEFT, padx=10)
 
-        body = tk.Frame(self.content_frame, bg=COLORS["bg_content"])
-        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        # ===== 主体区域：左右分栏 =====
+        body_container = tk.Frame(self.content_frame, bg=COLORS["bg_content"])
+        body_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        body_container.columnconfigure(0, weight=1)
+        body_container.columnconfigure(1, weight=0)
+        body_container.columnconfigure(2, weight=0)
+
+        # ---- 左侧：编辑器 ----
+        body = tk.Frame(body_container, bg=COLORS["bg_content"])
+        body.grid(row=0, column=0, sticky="nsew")
         body.rowconfigure(0, weight=1)
         body.rowconfigure(2, weight=1)
         body.columnconfigure(0, weight=1)
@@ -760,6 +769,13 @@ class LegalDocumentApp:
         self.copy_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.copy_btn.configure_state(tk.DISABLED)
 
+        # ===== 右侧面板切换按钮（替代原来的法条类案按钮） =====
+        self._toggle_ref_btn = FlatButton(toolbar, text="📁 法条", icon="",
+                                          command=self._toggle_ref_panel,
+                                          color="#8E44AD", hover_color="#9B59B6")
+        self._toggle_ref_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._toggle_ref_btn.configure_state(tk.DISABLED)
+
         self.status_var = tk.StringVar(value="就绪")
         self.status_label = tk.Label(toolbar, textvariable=self.status_var,
                                      font=(FONT_FAMILY, 9),
@@ -789,6 +805,14 @@ class LegalDocumentApp:
             state=tk.DISABLED
         )
         self.output_text.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+
+        # ---- 分隔线 ----
+        tk.Frame(body_container, bg=COLORS["border_light"], width=1).grid(row=0, column=1, sticky="ns", padx=5)
+
+        # ---- 右侧：法条与类案可折叠面板 ----
+        self._build_ref_panel_ui(body_container)
+        self._ref_panel_visible = False
+        self._ref_panel.grid_remove()
 
     def _clear_placeholder(self, event):
         placeholder = "请在此输入您的案件材料和信息，例如：\n\n当事人信息：原告张三，被告李四\n案件事实：...\n诉讼请求：...\n"
@@ -878,6 +902,328 @@ class LegalDocumentApp:
         self.copy_btn.configure_state(tk.NORMAL)
         self.status_var.set("✅ 完成")
         self.status_label.configure(fg=COLORS["success_green"])
+
+        # 保存最近生成的文书内容，自动触发法条与类案检索
+        self._last_refine_content = result
+        self.legal_references_data = None
+        self._toggle_ref_btn.configure_state(tk.DISABLED)
+        threading.Thread(target=self._fetch_legal_references, args=(result,), daemon=True).start()
+
+    def _fetch_legal_references(self, content):
+        """异步获取法条分析与类案推送。"""
+        if not self.config["api_key"] or self.config["api_key"] == "sk-xxxxxxxx":
+            self.root.after(0, lambda: self.status_var.set("⚠ 未配置API，跳过法条检索"))
+            return
+
+        system_prompt = (
+            "你是一位精通中国法律的高级法律检索专家。请根据以下法律文书内容，"
+            "进行专业的法律检索分析。\n\n"
+            "请分析以下三个方面，必须以 **JSON 数组格式** 返回（不要用markdown代码块包裹，纯JSON文本）：\n\n"
+            "1. legal_provisions（核心法律条文）：列出最相关的法律条文，每项包含：\n"
+            "   - law: 法律名称（如《中华人民共和国民法典》）\n"
+            "   - article: 具体条、款、项（如第一千二百一十七条）\n"
+            "   - summary: 该条文核心内容摘要（20字以内）\n"
+            "   - relevance: 与该案的相关性说明\n\n"
+            "2. reference_cases（相似参考案例）：推荐2-3个类似案例，每项包含：\n"
+            "   - type: 案例类型/案由\n"
+            "   - summary: 裁判要旨（50字以内）\n"
+            "   - value: 参考价值说明\n\n"
+            "3. risk_warnings（诉讼风险提示）：基于文书识别风险，每项包含：\n"
+            "   - type: 风险类型（证据风险/程序风险/实体风险/其他）\n"
+            "   - content: 具体风险描述与建议\n\n"
+            "返回格式示例（纯JSON，不要任何其他文字）：\n"
+            '{"legal_provisions":[{"law":"《中华人民共和国民法典》","article":"第一千二百一十七条","summary":"好意同乘责任减轻","relevance":"本案属于好意同乘情形"}],'
+            '"reference_cases":[{"type":"机动车交通事故责任纠纷","summary":"驾驶人无证驾驶，同乘人知情仍搭乘，减轻驾驶人责任","value":"与本案事实高度相似，具有重要参考价值"}],'
+            '"risk_warnings":[{"type":"证据风险","content":"建议收集行车记录仪视频以证明同乘人知情"}]}'
+        )
+        user_input = f"请对以下文书进行法条检索与类案分析：\n\n{content[:4000]}"
+
+        try:
+            result = call_api(self.config, system_prompt, user_input)
+            self.root.after(0, self._on_references_result, result)
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"⚠ 法条检索失败: {str(e)}"))
+
+    def _on_references_result(self, raw_result):
+        """处理法条类案API返回结果。"""
+        json_str = raw_result.strip()
+        if json_str.startswith("```"):
+            start = json_str.find("\n")
+            end = json_str.rfind("```")
+            if start != -1 and end != -1:
+                json_str = json_str[start:end].strip()
+        brace_start = json_str.find("{")
+        brace_end = json_str.rfind("}")
+        if brace_start != -1 and brace_end != -1:
+            json_str = json_str[brace_start:brace_end + 1]
+
+        try:
+            data = json.loads(json_str)
+            self.legal_references_data = {
+                "legal_provisions": data.get("legal_provisions", []),
+                "reference_cases": data.get("reference_cases", []),
+                "risk_warnings": data.get("risk_warnings", []),
+            }
+        except json.JSONDecodeError:
+            self.legal_references_data = {
+                "_raw": raw_result,
+                "legal_provisions": [],
+                "reference_cases": [],
+                "risk_warnings": [],
+            }
+        # 数据就绪后自动填充面板
+        self.root.after(0, self._on_references_ready)
+
+    def _on_references_ready(self):
+        """法条数据就绪：填充右侧面板并自动展开。"""
+        self._populate_ref_panel()
+        if self._ref_panel:
+            if not self._ref_panel_visible:
+                self._toggle_ref_panel()
+        self._toggle_ref_btn.configure_state(tk.NORMAL)
+        data = self.legal_references_data or {}
+        n_law = len(data.get("legal_provisions", []))
+        n_case = len(data.get("reference_cases", []))
+        n_risk = len(data.get("risk_warnings", []))
+        self.status_var.set(f"✅ 完成  📚 法条{n_law}条 · 类案{n_case}件 · 风险{n_risk}项")
+        self.status_label.configure(fg=COLORS["success_green"])
+
+    def _build_ref_panel_ui(self, parent):
+        """构建右侧可折叠法条面板的UI结构。"""
+        self._ref_panel = tk.Frame(parent, bg=COLORS["bg_card"],
+                                    highlightbackground=COLORS["border_light"],
+                                    highlightthickness=1)
+        self._ref_panel.grid(row=0, column=2, sticky="nsew")
+        self._ref_panel.grid_propagate(False)
+
+        # 面板标题栏（点击可折叠）
+        panel_header = tk.Frame(self._ref_panel, bg=COLORS["bg_card"], height=36)
+        panel_header.pack(fill=tk.X)
+        panel_header.pack_propagate(False)
+
+        tk.Label(panel_header, text="  📚  法条与类案",
+                 font=(FONT_FAMILY, 10, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack(side=tk.LEFT, padx=8, pady=6)
+        self._panel_close_btn = tk.Label(panel_header, text="  ✕  ",
+                                          font=(FONT_FAMILY, 10),
+                                          bg=COLORS["bg_card"], fg=COLORS["text_secondary"],
+                                          cursor="hand2")
+        self._panel_close_btn.pack(side=tk.RIGHT, padx=5)
+        self._panel_close_btn.bind("<ButtonPress-1>", lambda e: self._toggle_ref_panel())
+
+        tk.Frame(panel_header, bg=COLORS["accent_gold"], height=2).pack(fill=tk.X, padx=8)
+
+        # 滚动内容区域
+        panel_body = tk.Frame(self._ref_panel, bg=COLORS["bg_card"])
+        panel_body.pack(fill=tk.BOTH, expand=True)
+        panel_body.rowconfigure(0, weight=1)
+        panel_body.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(panel_body, bg=COLORS["bg_card"], highlightthickness=0)
+        scrollbar = tk.Scrollbar(panel_body, orient=tk.VERTICAL, command=canvas.yview,
+                                 bg=COLORS["bg_card"], troughcolor=COLORS["bg_card"])
+        self._ref_panel_content = tk.Frame(canvas, bg=COLORS["bg_card"])
+
+        self._ref_panel_content.bind("<Configure>",
+                                      lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self._ref_panel_content, anchor="nw",
+                              width=300)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+
+        # 初始化占位提示
+        self._ref_placeholder = tk.Label(
+            self._ref_panel_content,
+            text="\n\n生成文书后，\n法条与类案将\n自动显示在这里\n\n📚",
+            font=(FONT_FAMILY, 10),
+            bg=COLORS["bg_card"], fg=COLORS["text_secondary"],
+            justify=tk.CENTER
+        )
+        self._ref_placeholder.pack(expand=True, pady=40)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+    def _toggle_ref_panel(self):
+        """切换右侧面板的展开/折叠状态。"""
+        if not self._ref_panel:
+            return
+        if self._ref_panel_visible:
+            self._ref_panel.grid_remove()
+            self._ref_panel_visible = False
+            if self._toggle_ref_btn:
+                self._toggle_ref_btn._label.config(text="📁 法条")
+            self.status_var.set("📁 法条面板已关闭")
+            self.status_label.configure(fg=COLORS["text_secondary"])
+        else:
+            self._ref_panel.grid()
+            self._ref_panel_visible = True
+            if self._toggle_ref_btn:
+                self._toggle_ref_btn._label.config(text="📂 法条")
+            self.status_var.set("📂 法条面板已展开")
+            self.status_label.configure(fg=COLORS["success_green"])
+
+    def _populate_ref_panel(self):
+        """用法条类案数据填充右侧面板。"""
+        # 清空占位
+        for w in self._ref_panel_content.winfo_children():
+            w.destroy()
+
+        data = self.legal_references_data
+        if not data:
+            tk.Label(self._ref_panel_content,
+                     text="暂无数据", font=(FONT_FAMILY, 9),
+                     bg=COLORS["bg_card"], fg=COLORS["text_secondary"]
+                     ).pack(pady=20)
+            return
+
+        # 如果JSON解析失败，显示原始数据
+        if "_raw" in data:
+            tk.Label(self._ref_panel_content,
+                     text="⚠ JSON解析失败，显示原始返回：",
+                     font=(FONT_FAMILY, 9, "bold"),
+                     bg=COLORS["bg_card"], fg=COLORS["error_red"]
+                     ).pack(anchor="w", padx=10, pady=5)
+            raw_text = tk.Text(self._ref_panel_content,
+                               font=(FONT_FAMILY_MONO, 8), height=15,
+                               bg=COLORS["bg_input"], fg=COLORS["text_primary"],
+                               relief=tk.FLAT, borderwidth=0)
+            raw_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=5)
+            raw_text.insert("1.0", data["_raw"])
+            raw_text.config(state=tk.DISABLED)
+            return
+
+        parent = self._ref_panel_content
+        pad = 8
+
+        # ----- 1. 核心法律条文 -----
+        self._add_panel_section(
+            parent, "⚖  核心法律条文", COLORS["btn_primary"],
+            data.get("legal_provisions", []),
+            lambda item: (f"📜 {item.get('law', '')}\n"
+                          f"   条款：{item.get('article', '')}\n"
+                          f"   {item.get('summary', '')}\n"
+                          f"   {item.get('relevance', '')}")
+        )
+
+        # ----- 2. 相似参考案例 -----
+        self._add_panel_section(
+            parent, "📋  相似参考案例", COLORS["success_green"],
+            data.get("reference_cases", []),
+            lambda item: (f"🏛 {item.get('type', '')}\n"
+                          f"   {item.get('summary', '')}\n"
+                          f"   💡 {item.get('value', '')}")
+        )
+
+        # ----- 3. 诉讼风险提示 -----
+        risk_items = data.get("risk_warnings", [])
+        risk_frame = tk.Frame(parent, bg=COLORS["bg_card"])
+        risk_frame.pack(fill=tk.X, padx=pad, pady=2)
+
+        tk.Label(risk_frame, text="⚠  诉讼风险提示",
+                 font=(FONT_FAMILY, 9, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["error_red"]).pack(anchor="w")
+        tk.Frame(risk_frame, bg=COLORS["error_red"], height=1).pack(fill=tk.X, pady=2)
+
+        if not risk_items:
+            tk.Label(risk_frame, text="暂无明显的诉讼风险",
+                     font=(FONT_FAMILY, 8),
+                     bg=COLORS["bg_card"], fg=COLORS["text_secondary"]
+                     ).pack(anchor="w", pady=4)
+        else:
+            for item in risk_items:
+                rtype = item.get("type", "其他")
+                rcontent = item.get("content", "")
+                type_colors = {
+                    "证据风险": COLORS["warning_orange"],
+                    "程序风险": COLORS["btn_primary"],
+                    "实体风险": COLORS["error_red"],
+                }
+                color = type_colors.get(rtype, COLORS["warning_orange"])
+                item_f = tk.Frame(risk_frame, bg=COLORS["bg_card"])
+                item_f.pack(fill=tk.X, pady=2)
+                tk.Label(item_f, text=f"⚠ [{rtype}]",
+                         font=(FONT_FAMILY, 8, "bold"),
+                         bg=COLORS["bg_card"], fg=color).pack(anchor="w")
+                tk.Label(item_f, text=rcontent,
+                         font=(FONT_FAMILY, 8),
+                         bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+                         wraplength=280, justify=tk.LEFT).pack(anchor="w", padx=4)
+
+        # ----- 4. 底部操作按钮 -----
+        btn_frame = tk.Frame(parent, bg=COLORS["bg_card"])
+        btn_frame.pack(fill=tk.X, padx=pad, pady=8)
+        refresh_btn = tk.Label(btn_frame, text="🔄 重新检索",
+                                font=(FONT_FAMILY, 8),
+                                bg=COLORS["bg_card"], fg=COLORS["btn_primary"],
+                                cursor="hand2")
+        refresh_btn.pack()
+        refresh_btn.bind("<ButtonPress-1>", lambda e: self._re_fetch_references())
+
+    def _add_panel_section(self, parent, title, accent_color, items, format_fn):
+        """在面板中添加一个分类区块（法条/案例）。"""
+        section = tk.Frame(parent, bg=COLORS["bg_card"])
+        section.pack(fill=tk.X, padx=8, pady=2)
+
+        tk.Label(section, text=title,
+                 font=(FONT_FAMILY, 9, "bold"),
+                 bg=COLORS["bg_card"], fg=accent_color).pack(anchor="w")
+        tk.Label(section, text=f"共 {len(items)} 条",
+                 font=(FONT_FAMILY, 7),
+                 bg=COLORS["bg_card"], fg=COLORS["text_secondary"]
+                 ).pack(anchor="w", padx=4)
+        tk.Frame(section, bg=accent_color, height=1).pack(fill=tk.X, pady=2)
+
+        if not items:
+            tk.Label(section, text="暂无相关数据",
+                     font=(FONT_FAMILY, 8),
+                     bg=COLORS["bg_card"], fg=COLORS["text_secondary"]
+                     ).pack(anchor="w", pady=4)
+        else:
+            for i, item in enumerate(items, 1):
+                item_f = tk.Frame(section, bg=COLORS["bg_card"])
+                item_f.pack(fill=tk.X, pady=2)
+
+                text = f"{i}. {format_fn(item)}"
+                tk.Label(item_f, text=text,
+                         font=(FONT_FAMILY, 8),
+                         bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+                         wraplength=280, justify=tk.LEFT, anchor="w"
+                         ).pack(fill=tk.X)
+
+                if i < len(items):
+                    tk.Frame(item_f, bg=COLORS["border_light"], height=1).pack(fill=tk.X, pady=1)
+
+    def _re_fetch_references(self):
+        """手动重新检索法条类案。"""
+        if not self._last_refine_content:
+            messagebox.showwarning("提示", "没有已生成的文书内容可供检索。")
+            return
+        self._toggle_ref_btn.configure_state(tk.DISABLED)
+        self.status_var.set("⏳ 正在重新检索法条与类案...")
+        self.status_label.configure(fg=COLORS["btn_primary"])
+        # 面板显示加载中
+        if self._ref_panel_content:
+            for w in self._ref_panel_content.winfo_children():
+                w.destroy()
+            tk.Label(self._ref_panel_content,
+                     text="\n⏳ 正在检索...\n\n请稍候",
+                     font=(FONT_FAMILY, 10),
+                     bg=COLORS["bg_card"], fg=COLORS["text_secondary"],
+                     justify=tk.CENTER).pack(expand=True, pady=40)
+        threading.Thread(target=self._fetch_legal_references,
+                         args=(self._last_refine_content,), daemon=True).start()
 
     def _markdown_to_docx(self, md_text, output_path):
         """把 markdown 文本转换成 Word(.docx)。
