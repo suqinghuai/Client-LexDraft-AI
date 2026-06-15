@@ -522,6 +522,11 @@ class LegalDocumentApp:
                                         hover_color=COLORS["btn_primary_hover"])
         self.chat_send_btn.pack(side=tk.LEFT, padx=(0, 8))
 
+        self.chat_copy_btn = FlatButton(toolbar, text="复制回答", icon="📋",
+                                         command=self._copy_chat_reply,
+                                         color=COLORS["btn_success"], hover_color="#2ECC71")
+        self.chat_copy_btn.pack(side=tk.LEFT, padx=(0, 8))
+
         self.chat_clear_btn = FlatButton(toolbar, text="清空对话", icon="🧹",
                                          command=self._clear_chat,
                                          color="#7F8C8D", hover_color="#95A5A6")
@@ -599,6 +604,25 @@ class LegalDocumentApp:
         self.chat_send_btn.configure_state(tk.NORMAL)
         self.chat_status_var.set("✅ 完成")
         self.chat_status_label.configure(fg=COLORS["success_green"])
+
+    def _copy_chat_reply(self):
+        if not self.chat_messages:
+            messagebox.showinfo("提示", "暂无顾问回答可复制。")
+            return
+        last_ai_reply = None
+        for msg in reversed(self.chat_messages):
+            if msg.get("role") == "assistant":
+                last_ai_reply = msg["content"]
+                break
+        if last_ai_reply:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(last_ai_reply)
+            self.chat_status_var.set("✅ 已复制顾问回答")
+            self.chat_status_label.configure(fg=COLORS["success_green"])
+            self.chat_copy_btn._label.config(text="✅  已复制！")
+            self.root.after(1500, lambda: self.chat_copy_btn._label.config(text="📋  复制回答"))
+        else:
+            messagebox.showinfo("提示", "暂无顾问回答可复制。")
 
     def _clear_chat(self):
         self.chat_messages = []
@@ -867,6 +891,11 @@ class LegalDocumentApp:
                 messagebox.showwarning("提示", "没有可优化的文书内容，请先生成文书或在输入区粘贴文书。")
                 return
 
+        user_direction = self.input_text.get("1.0", tk.END).strip()
+        placeholder = "请在此输入您的案件材料和信息，例如：\n\n当事人信息：原告张三，被告李四\n案件事实：...\n诉讼请求：...\n"
+        if user_direction == placeholder.strip():
+            user_direction = ""
+
         self.refine_btn.configure_state(tk.DISABLED)
         self.gen_btn.configure_state(tk.DISABLED)
         self._start_progress()
@@ -877,11 +906,18 @@ class LegalDocumentApp:
         if not system_prompt:
             system_prompt = (
                 "你是一位精通中国法律的专业律师和法律文书撰写优化专家，擅长草拟规范的法律文书。"
-                "请根据用户提供的文案，对其进行修改优化，确保用语严谨、格式规范。"
+                "请根据用户提供的文案和优化方向，对其进行修改优化，确保用语严谨、格式规范。"
                 "直接返回优化的最终结果和指出优化的地方。"
             )
 
-        user_input = f"请对以下文书进行修改优化：\n\n{current_result}"
+        if user_direction:
+            user_input = (
+                f"请根据以下优化方向对文书进行修改优化：\n\n"
+                f"【优化方向】\n{user_direction}\n\n"
+                f"【待优化文书】\n{current_result}"
+            )
+        else:
+            user_input = f"请对以下文书进行修改优化：\n\n{current_result}"
 
         def worker():
             result = call_api(self.config, system_prompt, user_input)
@@ -1164,11 +1200,19 @@ class LegalDocumentApp:
         # ----- 4. 底部操作按钮 -----
         btn_frame = tk.Frame(parent, bg=COLORS["bg_card"])
         btn_frame.pack(fill=tk.X, padx=pad, pady=8)
+
+        self._ref_copy_btn = tk.Label(btn_frame, text="📋 复制结果",
+                             font=(FONT_FAMILY, 8),
+                             bg=COLORS["bg_card"], fg=COLORS["btn_success"],
+                             cursor="hand2")
+        self._ref_copy_btn.pack(side=tk.LEFT, padx=(0, 15))
+        self._ref_copy_btn.bind("<ButtonPress-1>", lambda e: self._copy_legal_references())
+
         refresh_btn = tk.Label(btn_frame, text="🔄 重新检索",
                                 font=(FONT_FAMILY, 8),
                                 bg=COLORS["bg_card"], fg=COLORS["btn_primary"],
                                 cursor="hand2")
-        refresh_btn.pack()
+        refresh_btn.pack(side=tk.LEFT)
         refresh_btn.bind("<ButtonPress-1>", lambda e: self._re_fetch_references())
 
     def _add_panel_section(self, parent, title, accent_color, items, format_fn):
@@ -1204,6 +1248,53 @@ class LegalDocumentApp:
 
                 if i < len(items):
                     tk.Frame(item_f, bg=COLORS["border_light"], height=1).pack(fill=tk.X, pady=1)
+
+    def _copy_legal_references(self):
+        data = self.legal_references_data
+        if not data:
+            messagebox.showinfo("提示", "暂无法条类案数据可复制。")
+            return
+
+        if "_raw" in data:
+            text = data["_raw"]
+        else:
+            lines = []
+            provisions = data.get("legal_provisions", [])
+            if provisions:
+                lines.append("【核心法律条文】")
+                for i, item in enumerate(provisions, 1):
+                    lines.append(f"{i}. {item.get('law', '')} {item.get('article', '')}")
+                    lines.append(f"   摘要：{item.get('summary', '')}")
+                    lines.append(f"   相关性：{item.get('relevance', '')}")
+                lines.append("")
+
+            cases = data.get("reference_cases", [])
+            if cases:
+                lines.append("【相似参考案例】")
+                for i, item in enumerate(cases, 1):
+                    lines.append(f"{i}. {item.get('type', '')}")
+                    lines.append(f"   裁判要旨：{item.get('summary', '')}")
+                    lines.append(f"   参考价值：{item.get('value', '')}")
+                lines.append("")
+
+            risks = data.get("risk_warnings", [])
+            if risks:
+                lines.append("【诉讼风险提示】")
+                for i, item in enumerate(risks, 1):
+                    lines.append(f"{i}. [{item.get('type', '其他')}] {item.get('content', '')}")
+
+            text = "\n".join(lines)
+
+        if text.strip():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.status_var.set("✅ 已复制法条类案结果")
+            self.status_label.configure(fg=COLORS["success_green"])
+            if hasattr(self, '_ref_copy_btn') and self._ref_copy_btn.winfo_exists():
+                self._ref_copy_btn.config(text="✅ 已复制！", fg=COLORS["success_green"])
+                self.root.after(1500, lambda: self._ref_copy_btn.config(text="📋 复制结果", fg=COLORS["btn_success"]) if hasattr(self, '_ref_copy_btn') and self._ref_copy_btn.winfo_exists() else None)
+        else:
+            messagebox.showinfo("提示", "暂无内容可复制。")
 
     def _re_fetch_references(self):
         """手动重新检索法条类案。"""
@@ -1432,6 +1523,8 @@ class LegalDocumentApp:
             self.root.clipboard_append(content)
             self.status_var.set("✅ 已复制")
             self.status_label.configure(fg=COLORS["success_green"])
+            self.copy_btn._label.config(text="✅  已复制！")
+            self.root.after(1500, lambda: self.copy_btn._label.config(text="📋  复制结果"))
 
     def _timestamp(self):
         return datetime.now().strftime("%Y%m%d_%H%M%S")
