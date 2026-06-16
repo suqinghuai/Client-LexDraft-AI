@@ -74,8 +74,8 @@ python main.py
 **打包为 exe：**
 
 ```bash
-pip install pyinstaller
-pyinstaller main.spec
+uv pip install pyinstaller
+venv\Scripts\python.exe -m PyInstaller -i my.ico -w -F --add-data "prompt;prompt" --add-data "my.ico;." main.py
 ```
 
 打包产物位于 `dist/` 目录，需将 `config.ini` 和 `prompt/` 文件夹一同分发。
