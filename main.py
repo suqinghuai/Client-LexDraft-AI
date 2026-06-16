@@ -378,6 +378,13 @@ class LegalDocumentApp:
         )
         self._chat_btn.pack(pady=2)
 
+        self._guide_btn = HoverButton(
+            chat_top_frame, text="智能引导",
+            icon="🔍", command=self._show_guide,
+            width=250, font_size=10, bold=True
+        )
+        self._guide_btn.pack(pady=2)
+
         tk.Label(self.nav_outer, text="文书分类", font=(FONT_FAMILY, 9),
                  bg=COLORS["bg_dark"], fg=COLORS["text_secondary"]).pack(anchor="w", padx=20, pady=(8, 3))
 
@@ -451,6 +458,250 @@ class LegalDocumentApp:
         # 智能法律顾问按钮的高亮态
         if self._chat_btn is not None:
             self._chat_btn.set_active(doc_name == "__chat__")
+        # 智能引导按钮的高亮态
+        if self._guide_btn is not None:
+            self._guide_btn.set_active(doc_name == "__guide__")
+
+    def _get_all_doc_names(self):
+        """从 DOCUMENT_TREE 收集所有文书名称列表。"""
+        names = []
+        for cat1_data in DOCUMENT_TREE.values():
+            if isinstance(cat1_data, dict):
+                for cat2_data in cat1_data.values():
+                    if isinstance(cat2_data, dict):
+                        for docs in cat2_data.values():
+                            names.extend(docs)
+                    else:
+                        names.extend(cat2_data)
+        return names
+
+    def _show_guide(self):
+        """智能引导页面：用户输入需求，AI 分析后推荐文书类型。"""
+        self._clear_content()
+        self.current_doc = "__guide__"
+        self._update_nav_active("__guide__")
+
+        header = tk.Frame(self.content_frame, bg=COLORS["bg_card"])
+        header.pack(fill=tk.X, padx=20, pady=(15, 0))
+
+        tk.Label(header, text="🔍  智能引导",
+                 font=(FONT_FAMILY, 16, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack(side=tk.LEFT, padx=15, pady=12)
+        tk.Label(header, text="描述您的需求，AI 为您推荐最合适的文书类型",
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_card"],
+                 font=(FONT_FAMILY, 9)).pack(side=tk.LEFT, padx=10)
+
+        body = tk.Frame(self.content_frame, bg=COLORS["bg_content"])
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        body.rowconfigure(1, weight=1)
+        body.columnconfigure(0, weight=1)
+
+        input_card = tk.Frame(body, bg=COLORS["bg_card"],
+                              highlightbackground=COLORS["border_light"],
+                              highlightthickness=1)
+        input_card.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+
+        input_header = tk.Frame(input_card, bg=COLORS["bg_card"])
+        input_header.pack(fill=tk.X)
+        tk.Label(input_header, text="  描述您的需求", font=(FONT_FAMILY, 10, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack(side=tk.LEFT, padx=10, pady=8)
+        tk.Frame(input_header, bg=COLORS["btn_primary"], height=2).pack(fill=tk.X, padx=10)
+
+        self.guide_input = scrolledtext.ScrolledText(
+            input_card, wrap=tk.WORD,
+            font=(FONT_FAMILY, 10), height=5,
+            bg=COLORS["bg_input"], fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"],
+            relief=tk.FLAT, borderwidth=0,
+            selectbackground=COLORS["btn_primary"]
+        )
+        self.guide_input.pack(fill=tk.X, padx=15, pady=10)
+
+        guide_placeholder = (
+            "请描述您的法律需求，例如：\n\n"
+            "· 邻居装修损坏了我家墙壁，我想起诉他赔偿\n"
+            "· 我对一审判决不服，想向上级法院上诉\n"
+            "· 我想举报某官员贪污腐败行为\n"
+            "· 公司拖欠工资，我想申请仲裁"
+        )
+        self.guide_input.insert("1.0", guide_placeholder)
+        self.guide_input.bind("<FocusIn>", self._clear_guide_placeholder)
+
+        toolbar = tk.Frame(body, bg=COLORS["bg_content"])
+        toolbar.grid(row=1, column=0, sticky="ew", pady=5)
+
+        self.guide_btn = FlatButton(toolbar, text="开始分析", icon="🚀",
+                                    command=self._classify_document,
+                                    color=COLORS["btn_primary"],
+                                    hover_color=COLORS["btn_primary_hover"])
+        self.guide_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.guide_status_var = tk.StringVar(value="就绪")
+        self.guide_status_label = tk.Label(toolbar, textvariable=self.guide_status_var,
+                                           font=(FONT_FAMILY, 9),
+                                           bg=COLORS["bg_content"], fg=COLORS["text_secondary"])
+        self.guide_status_label.pack(side=tk.RIGHT, padx=10)
+
+        self.guide_progress = ttk.Progressbar(toolbar, mode="indeterminate", length=120)
+
+        result_card = tk.Frame(body, bg=COLORS["bg_card"],
+                               highlightbackground=COLORS["border_light"],
+                               highlightthickness=1)
+        result_card.grid(row=2, column=0, sticky="nsew", pady=(5, 0))
+
+        result_header = tk.Frame(result_card, bg=COLORS["bg_card"])
+        result_header.pack(fill=tk.X)
+        tk.Label(result_header, text="  分析结果", font=(FONT_FAMILY, 10, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack(side=tk.LEFT, padx=10, pady=8)
+        tk.Frame(result_header, bg=COLORS["accent_gold"], height=2).pack(fill=tk.X, padx=10)
+
+        self.guide_result_frame = tk.Frame(result_card, bg=COLORS["bg_card"])
+        self.guide_result_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+
+        tk.Label(self.guide_result_frame,
+                 text="\n\n💡 请在上方输入您的需求，\n点击「开始分析」获取推荐\n\n",
+                 font=(FONT_FAMILY, 10),
+                 bg=COLORS["bg_card"], fg=COLORS["text_secondary"],
+                 justify=tk.CENTER).pack(expand=True)
+
+    def _clear_guide_placeholder(self, event):
+        placeholder = (
+            "请描述您的法律需求，例如：\n\n"
+            "· 邻居装修损坏了我家墙壁，我想起诉他赔偿\n"
+            "· 我对一审判决不服，想向上级法院上诉\n"
+            "· 我想举报某官员贪污腐败行为\n"
+            "· 公司拖欠工资，我想申请仲裁"
+        )
+        if self.guide_input.get("1.0", tk.END).strip() == placeholder.strip():
+            self.guide_input.delete("1.0", tk.END)
+
+    def _classify_document(self):
+        user_input = self.guide_input.get("1.0", tk.END).strip()
+        placeholder = (
+            "请描述您的法律需求，例如：\n\n"
+            "· 邻居装修损坏了我家墙壁，我想起诉他赔偿\n"
+            "· 我对一审判决不服，想向上级法院上诉\n"
+            "· 我想举报某官员贪污腐败行为\n"
+            "· 公司拖欠工资，我想申请仲裁"
+        )
+        if not user_input or user_input == placeholder.strip():
+            messagebox.showwarning("提示", "请先描述您的法律需求。")
+            return
+
+        if not self.config["api_key"] or self.config["api_key"] == "sk-xxxxxxxx":
+            messagebox.showwarning("提示", "请先在「设置」中配置有效的API Key。")
+            return
+
+        self.guide_btn.configure_state(tk.DISABLED)
+        self.guide_progress.pack(side=tk.RIGHT, padx=5)
+        self.guide_progress.start(15)
+        self.guide_status_var.set("⏳ 正在分析您的需求...")
+        self.guide_status_label.configure(fg=COLORS["btn_primary"])
+
+        all_docs = self._get_all_doc_names()
+        doc_list_str = "、".join(all_docs)
+
+        system_prompt = (
+            "你是一位精通中国法律的法律文书分类专家。用户会描述自己的法律需求，"
+            "你需要根据需求推荐最合适的法律文书类型。\n\n"
+            f"可选的法律文书类型有：{doc_list_str}\n\n"
+            "请按以下 JSON 格式返回分析结果（纯JSON文本，不要用markdown代码块包裹）：\n"
+            '{"recommendations": [{'
+            '"name": "文书名称（必须从可选列表中选择）",'
+            '"reason": "推荐理由（50字以内）",'
+            '"confidence": "高/中/低"'
+            '}]}'
+            "\n\n规则：\n"
+            "1. 最多推荐3个最相关的文书类型，按相关度从高到低排列\n"
+            "2. name 必须严格从可选列表中选择，不能自创\n"
+            "3. 如果用户需求不属于任何已有文书类型，recommendations 返回空数组"
+        )
+
+        user_message = f"我的法律需求是：{user_input}"
+
+        def worker():
+            result = call_api(self.config, system_prompt, user_message)
+            self.root.after(0, self._on_classify_result, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_classify_result(self, raw_result):
+        self.guide_progress.stop()
+        self.guide_progress.pack_forget()
+        self.guide_btn.configure_state(tk.NORMAL)
+
+        for w in self.guide_result_frame.winfo_children():
+            w.destroy()
+
+        json_str = raw_result.strip()
+        if json_str.startswith("```"):
+            start = json_str.find("\n")
+            end = json_str.rfind("```")
+            if start != -1 and end != -1:
+                json_str = json_str[start:end].strip()
+        brace_start = json_str.find("{")
+        brace_end = json_str.rfind("}")
+        if brace_start != -1 and brace_end != -1:
+            json_str = json_str[brace_start:brace_end + 1]
+
+        try:
+            data = json.loads(json_str)
+            recommendations = data.get("recommendations", [])
+        except json.JSONDecodeError:
+            recommendations = []
+
+        if not recommendations:
+            tk.Label(self.guide_result_frame,
+                     text="\n\n😕 未能匹配到合适的文书类型\n\n请尝试更详细地描述您的需求，\n或从左侧菜单手动选择文书类型",
+                     font=(FONT_FAMILY, 10),
+                     bg=COLORS["bg_card"], fg=COLORS["text_secondary"],
+                     justify=tk.CENTER).pack(expand=True)
+            self.guide_status_var.set("⚠ 未匹配到文书类型")
+            self.guide_status_label.configure(fg=COLORS["warning_orange"])
+            return
+
+        tk.Label(self.guide_result_frame,
+                 text=f"为您推荐了 {len(recommendations)} 个文书类型：",
+                 font=(FONT_FAMILY, 10, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack(anchor="w", pady=(5, 10))
+
+        confidence_colors = {"高": COLORS["success_green"], "中": COLORS["warning_orange"], "低": COLORS["text_secondary"]}
+
+        for i, rec in enumerate(recommendations):
+            name = rec.get("name", "")
+            reason = rec.get("reason", "")
+            confidence = rec.get("confidence", "中")
+            color = confidence_colors.get(confidence, COLORS["text_secondary"])
+
+            item_frame = tk.Frame(self.guide_result_frame, bg=COLORS["bg_card"],
+                                  highlightbackground=COLORS["border_light"],
+                                  highlightthickness=1)
+            item_frame.pack(fill=tk.X, pady=5)
+
+            top_row = tk.Frame(item_frame, bg=COLORS["bg_card"])
+            top_row.pack(fill=tk.X, padx=12, pady=(10, 0))
+
+            tk.Label(top_row, text=f"{['🥇', '🥈', '🥉'][i] if i < 3 else '📌'}  {name}",
+                     font=(FONT_FAMILY, 12, "bold"),
+                     bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
+
+            tk.Label(top_row, text=f"匹配度：{confidence}",
+                     font=(FONT_FAMILY, 9),
+                     bg=COLORS["bg_card"], fg=color).pack(side=tk.RIGHT)
+
+            tk.Label(item_frame, text=f"    {reason}",
+                     font=(FONT_FAMILY, 9),
+                     bg=COLORS["bg_card"], fg=COLORS["text_secondary"],
+                     wraplength=600, justify=tk.LEFT, anchor="w").pack(fill=tk.X, padx=12, pady=(2, 5))
+
+            go_btn = FlatButton(item_frame, text="前往草拟", icon="✍️",
+                                command=lambda d=name: self._select_doc(d),
+                                color=COLORS["btn_primary"],
+                                hover_color=COLORS["btn_primary_hover"])
+            go_btn.pack(padx=12, pady=(0, 10), anchor="w")
+
+        self.guide_status_var.set("✅ 分析完成")
+        self.guide_status_label.configure(fg=COLORS["success_green"])
 
     def _show_chat(self):
         """智能法律顾问聊天界面。"""
