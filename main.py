@@ -26,6 +26,7 @@ else:
     RESOURCE_DIR = BASE_DIR
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
+HISTORY_DIR = os.path.join(BASE_DIR, "history")
 
 COLORS = {
     "bg_dark": "#1B2A4A",
@@ -334,6 +335,7 @@ class LegalDocumentApp:
         self._ref_panel_content = None             # 面板内滚动区域Frame
         self._toggle_ref_btn = None                # 面板切换按钮
 
+        self._history_buttons = []
         self._build_ui()
         self._show_home()
 
@@ -385,6 +387,56 @@ class LegalDocumentApp:
         )
         self._guide_btn.pack(pady=2)
 
+        bottom_frame = tk.Frame(self.nav_outer, bg=COLORS["bg_dark"])
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 10))
+
+        home_btn = HoverButton(bottom_frame, text="首页", icon="🏠",
+                               command=self._show_home, width=250, font_size=9, bold=True)
+        home_btn.pack(pady=2)
+
+        settings_btn = HoverButton(bottom_frame, text="系统设置", icon="⚙",
+                                   command=self._show_settings, width=250, font_size=9, bold=True)
+        settings_btn.pack(pady=2)
+
+        tk.Frame(self.nav_outer, bg=COLORS["divider"], height=1).pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=5)
+
+        self._history_section = CollapsibleSection(self.nav_outer, "历史记录", level=1, expanded=False)
+        self._history_section.pack(side=tk.BOTTOM, fill=tk.X, padx=2, pady=(0, 2))
+
+        hist_toolbar = tk.Frame(self._history_section.content, bg=COLORS["bg_dark"])
+        hist_toolbar.pack(fill=tk.X, padx=5, pady=(2, 0))
+        hist_clear_btn = tk.Label(hist_toolbar, text="清空全部",
+                                   font=(FONT_FAMILY, 8),
+                                   bg=COLORS["bg_dark"], fg=COLORS["error_red"],
+                                   cursor="hand2")
+        hist_clear_btn.pack(side=tk.RIGHT, padx=5)
+        hist_clear_btn.bind("<ButtonPress-1>", lambda e: self._clear_all_history())
+        hist_clear_btn.bind("<Enter>", lambda e: hist_clear_btn.configure(fg="#FF6B6B"))
+        hist_clear_btn.bind("<Leave>", lambda e: hist_clear_btn.configure(fg=COLORS["error_red"]))
+
+        self._history_canvas = tk.Canvas(self._history_section.content, bg=COLORS["bg_dark"], highlightthickness=0, height=150)
+        self._history_scrollbar = tk.Scrollbar(self._history_section.content, orient=tk.VERTICAL,
+                                                command=self._history_canvas.yview,
+                                                bg=COLORS["bg_dark"],
+                                                troughcolor=COLORS["bg_dark"])
+        self._history_inner = tk.Frame(self._history_canvas, bg=COLORS["bg_dark"])
+
+        self._history_inner.bind("<Configure>",
+                                  lambda e: self._history_canvas.configure(scrollregion=self._history_canvas.bbox("all")))
+        self._history_canvas.create_window((0, 0), window=self._history_inner, anchor="nw", width=240)
+        self._history_canvas.configure(yscrollcommand=self._history_scrollbar.set)
+
+        def _on_hist_mousewheel(event):
+            self._history_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._history_canvas.bind("<MouseWheel>", _on_hist_mousewheel)
+        self._history_inner.bind("<MouseWheel>", _on_hist_mousewheel)
+
+        self._history_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        self._history_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._refresh_history_nav()
+
+        tk.Frame(self.nav_outer, bg=COLORS["divider"], height=1).pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=5)
+
         tk.Label(self.nav_outer, text="文书分类", font=(FONT_FAMILY, 9),
                  bg=COLORS["bg_dark"], fg=COLORS["text_secondary"]).pack(anchor="w", padx=20, pady=(8, 3))
 
@@ -434,19 +486,6 @@ class LegalDocumentApp:
                             )
                             btn.pack(padx=5, pady=1)
                             self._nav_buttons.append((btn, doc_name))
-
-        tk.Frame(self.nav_outer, bg=COLORS["divider"], height=1).pack(fill=tk.X, padx=15, pady=5)
-
-        bottom_frame = tk.Frame(self.nav_outer, bg=COLORS["bg_dark"])
-        bottom_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-
-        home_btn = HoverButton(bottom_frame, text="首页", icon="🏠",
-                               command=self._show_home, width=250, font_size=9, bold=True)
-        home_btn.pack(pady=2)
-
-        settings_btn = HoverButton(bottom_frame, text="系统设置", icon="⚙",
-                                   command=self._show_settings, width=250, font_size=9, bold=True)
-        settings_btn.pack(pady=2)
 
     def _clear_content(self):
         for w in self.content_frame.winfo_children():
@@ -1189,6 +1228,8 @@ class LegalDocumentApp:
         self.copy_btn.configure_state(tk.NORMAL)
         self.status_var.set("✅ 完成")
         self.status_label.configure(fg=COLORS["success_green"])
+
+        self._save_history(self.current_doc or "文书", result)
 
         # 保存最近生成的文书内容，自动触发法条与类案检索
         self._last_refine_content = result
@@ -1947,6 +1988,178 @@ class LegalDocumentApp:
                    hover_color=COLORS["btn_primary_hover"]).pack(side=tk.LEFT)
         FlatButton(btn_frame, text="取消", command=edit_win.destroy,
                    color="#7F8C8D", hover_color="#95A5A6").pack(side=tk.LEFT, padx=8)
+
+    def _save_history(self, doc_name, content):
+        os.makedirs(HISTORY_DIR, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        display_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        filename = f"{timestamp}_{doc_name}.json"
+        filepath = os.path.join(HISTORY_DIR, filename)
+        record = {
+            "doc_name": doc_name,
+            "time": display_time,
+            "timestamp": timestamp,
+            "content": content
+        }
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+        self._refresh_history_nav()
+
+    def _load_history_list(self):
+        if not os.path.exists(HISTORY_DIR):
+            return []
+        records = []
+        for f in sorted(os.listdir(HISTORY_DIR), reverse=True):
+            if f.endswith(".json"):
+                filepath = os.path.join(HISTORY_DIR, f)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                        data["_filepath"] = filepath
+                        data["_filename"] = f
+                        records.append(data)
+                except Exception:
+                    pass
+        return records
+
+    def _refresh_history_nav(self):
+        for w in self._history_inner.winfo_children():
+            w.destroy()
+        self._history_buttons = []
+        records = self._load_history_list()
+        if not records:
+            tk.Label(self._history_inner, text="暂无历史记录",
+                     font=(FONT_FAMILY, 8),
+                     bg=COLORS["bg_dark"], fg=COLORS["text_secondary"]).pack(pady=8)
+            return
+        for rec in records[:50]:
+            item_frame = tk.Frame(self._history_inner, bg=COLORS["bg_dark"])
+            item_frame.pack(fill=tk.X, padx=2, pady=1)
+
+            name_label = tk.Label(item_frame, text=f"📄 {rec.get('doc_name', '未知')}",
+                                   font=(FONT_FAMILY, 8),
+                                   bg=COLORS["bg_dark"], fg=COLORS["text_sidebar"],
+                                   anchor="w", cursor="hand2")
+            name_label.pack(side=tk.LEFT, padx=(8, 2))
+
+            time_label = tk.Label(item_frame, text=rec.get('time', ''),
+                                   font=(FONT_FAMILY, 7),
+                                   bg=COLORS["bg_dark"], fg=COLORS["text_secondary"],
+                                   anchor="e")
+            time_label.pack(side=tk.LEFT, padx=2)
+
+            del_label = tk.Label(item_frame, text="✕",
+                                  font=(FONT_FAMILY, 8),
+                                  bg=COLORS["bg_dark"], fg=COLORS["error_red"],
+                                  cursor="hand2")
+            del_label.pack(side=tk.RIGHT, padx=(2, 6))
+
+            filepath = rec.get("_filepath", "")
+            name_label.bind("<ButtonPress-1>", lambda e, fp=filepath: self._show_history_detail(fp))
+            name_label.bind("<Enter>", lambda e, lbl=name_label: lbl.configure(fg="#FFFFFF"))
+            name_label.bind("<Leave>", lambda e, lbl=name_label: lbl.configure(fg=COLORS["text_sidebar"]))
+            del_label.bind("<ButtonPress-1>", lambda e, fp=filepath: self._delete_history(fp))
+            del_label.bind("<Enter>", lambda e, lbl=del_label: lbl.configure(fg="#FF6B6B"))
+            del_label.bind("<Leave>", lambda e, lbl=del_label: lbl.configure(fg=COLORS["error_red"]))
+
+    def _show_history_detail(self, filepath):
+        if not os.path.exists(filepath):
+            messagebox.showwarning("提示", "该历史记录文件不存在。")
+            self._refresh_history_nav()
+            return
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror("错误", f"读取历史记录失败：{e}")
+            return
+
+        detail_win = tk.Toplevel(self.root)
+        detail_win.title(f"历史记录 - {data.get('doc_name', '未知')}")
+        detail_win.geometry("700x550")
+        detail_win.configure(bg=COLORS["bg_content"])
+
+        header = tk.Frame(detail_win, bg=COLORS["bg_card"])
+        header.pack(fill=tk.X)
+        tk.Label(header, text=f"  📄 {data.get('doc_name', '未知')}",
+                 font=(FONT_FAMILY, 13, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack(side=tk.LEFT, padx=15, pady=10)
+        tk.Label(header, text=f"  {data.get('time', '')}",
+                 font=(FONT_FAMILY, 9),
+                 bg=COLORS["bg_card"], fg=COLORS["text_secondary"]).pack(side=tk.LEFT, padx=5)
+
+        content_text = scrolledtext.ScrolledText(
+            detail_win, wrap=tk.WORD, font=(FONT_FAMILY, 10),
+            bg=COLORS["bg_input"], fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"],
+            relief=tk.FLAT, borderwidth=0,
+            selectbackground=COLORS["btn_primary"]
+        )
+        content_text.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+        content_text.insert("1.0", data.get("content", ""))
+        content_text.config(state=tk.DISABLED)
+
+        btn_frame = tk.Frame(detail_win, bg=COLORS["bg_content"])
+        btn_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+
+        def copy_content():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(data.get("content", ""))
+            copy_btn._label.config(text="✅  已复制！")
+            self.root.after(1500, lambda: copy_btn._label.config(text="📋  复制内容"))
+
+        copy_btn = FlatButton(btn_frame, text="复制内容", icon="📋",
+                               command=copy_content,
+                               color=COLORS["btn_success"], hover_color="#2ECC71")
+        copy_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        def load_to_editor():
+            doc_name = data.get("doc_name", "")
+            all_docs = self._get_all_doc_names()
+            if doc_name in all_docs:
+                self._select_doc(doc_name)
+            content = data.get("content", "")
+            if hasattr(self, 'output_text') and self.output_text.winfo_exists():
+                self.output_text.config(state=tk.NORMAL)
+                self.output_text.delete("1.0", tk.END)
+                self.output_text.insert("1.0", content)
+                self.output_text.config(state=tk.DISABLED)
+            detail_win.destroy()
+
+        FlatButton(btn_frame, text="载入到编辑器", icon="✍️",
+                   command=load_to_editor,
+                   color=COLORS["btn_primary"],
+                   hover_color=COLORS["btn_primary_hover"]).pack(side=tk.LEFT, padx=(0, 8))
+
+        FlatButton(btn_frame, text="关闭", icon="✕",
+                   command=detail_win.destroy,
+                   color="#7F8C8D", hover_color="#95A5A6").pack(side=tk.LEFT)
+
+    def _delete_history(self, filepath):
+        if not os.path.exists(filepath):
+            self._refresh_history_nav()
+            return
+        try:
+            os.remove(filepath)
+            self._refresh_history_nav()
+        except Exception as e:
+            messagebox.showerror("错误", f"删除历史记录失败：{e}")
+
+    def _clear_all_history(self):
+        records = self._load_history_list()
+        if not records:
+            messagebox.showinfo("提示", "暂无历史记录可清空。")
+            return
+        if not messagebox.askyesno("确认清空", f"确定要清空全部 {len(records)} 条历史记录吗？此操作不可恢复。"):
+            return
+        for rec in records:
+            fp = rec.get("_filepath", "")
+            if fp and os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+        self._refresh_history_nav()
 
     def _save_settings(self):
         config = configparser.ConfigParser()
